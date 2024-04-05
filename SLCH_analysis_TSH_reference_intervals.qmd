@@ -1,0 +1,31 @@
+---
+title: "TSH Reference Intervals"
+author: "Nick Spies, MD"
+format: html
+editor: visual
+---
+
+```{r}
+
+library(tidyverse)
+library(refineR)
+library(gtsummary)
+library(gt)
+
+data <- read_delim("data/slch_TSH_2023_2024.txt")
+```
+
+```{r}
+
+data |> ggplot(aes(`Lab Component Value`)) + 
+  geom_density() +
+  scale_x_continuous(limits = c(0, 10)) + 
+  theme_classic()
+```
+
+## RefineR Reference Intervals
+
+```{r}
+
+ri <- findRI(data$`Lab Component Value`, model = "modBoxCox")
+```
