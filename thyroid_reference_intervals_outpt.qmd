@@ -1,0 +1,246 @@
+---
+title: "Thyroid Reference Interval Code Walk-through"
+author: "Yanchun Lin and Nick Spies"
+format: html
+editor: visual
+---
+
+## Configure Environment
+
+```{r}
+
+library(tidyverse)
+source("helpers/helpers.R")
+set.seed(12345)
+
+theme_ns <- theme(text = element_text(family = "Helvetica"),
+                  title = element_text(size = 16, margin = margin(0, 0, 8, 0)),
+                  plot.subtitle = element_text(size = 12, face = "plain", hjust = 0),
+                  plot.title = element_text(hjust = 0),
+                  axis.title = element_text(size = 12, face = "bold", margin = margin(4,4,4,4)),
+                  axis.title.x.bottom = element_text(face = "bold", margin = margin(4,0,0,0)),
+                  axis.title.y.left = element_text(face = "bold", margin = margin(0,4,0,0)),
+                  legend.title = element_text(face = "bold.italic", size = 12),
+                  axis.line = element_line(),
+                  axis.ticks = element_blank(),
+                  panel.grid = element_blank(), 
+                  panel.background = element_blank(),
+                  strip.text = element_text(size = 10, face = "bold.italic"),
+                  strip.background = element_blank())
+theme_set(theme_ns)
+
+### Read in data from each sheet as separate years
+
+file_path <- "C:/Users/yanch/OneDrive - Washington University in St. Louis/clin_chem/01_research/07_indirect_ri/outpatient.xlsx"
+
+
+raw_data_2016 <- readxl::read_xlsx(file_path, sheet = "2016") |> select(-RESULT_ASCII, -RESULT_ALPHA)
+raw_data_2017 <- readxl::read_xlsx(file_path, sheet = "2017") |> select(-RESULT_ASCII, -RESULT_ALPHA)
+raw_data_2018 <- readxl::read_xlsx(file_path, sheet = "2018") |> select(-RESULT_ASCII, -RESULT_ALPHA)
+raw_data_2019 <- readxl::read_xlsx(file_path, sheet = "2019") |> select(-RESULT_ASCII, -RESULT_ALPHA)
+raw_data_2020 <- readxl::read_xlsx(file_path, sheet = "2020") |> select(-RESULT_ASCII, -RESULT_ALPHA)
+raw_data_2021 <- readxl::read_xlsx(file_path, sheet = "2021") |> select(-RESULT_ASCII, -RESULT_ALPHA)
+
+### Combine all years into one data frame
+raw_data <- bind_rows(raw_data_2016, raw_data_2017, raw_data_2018, raw_data_2019, raw_data_2020, raw_data_2021)
+
+### Standardize column names and remove "Cascade" from the test names
+data <-
+  raw_data |> 
+  janitor::clean_names()
+
+### Keep only rows from patients >21 years old
+data <-
+  data |> 
+  dplyr::filter(age > 21)
+
+```
+
+## Preprocess Data
+
+```{r}
+
+### Switch from Long Form to Wide Form, where all results drawn at the same time are in the same row
+data_wide <-
+  data |> 
+  mutate(dta = str_replace_all(dta, coll(" (Cascade)"), ""), 
+         result = result |> as.character() |> str_replace_all(" |>|<|,", "") |> as.numeric(), 
+         age = as.numeric(str_replace_all(age, " Years", ""))) |> 
+  pivot_wider(names_from = dta, values_from = result, values_fn = last) |> 
+  janitor::clean_names()
+
+### Fill missing values and remove duplicates
+data_filled <- 
+  data_wide |> 
+  group_by(person_id, recd_dttm) |> 
+  fill(tsh, t4_free, t3_free, .direction = "downup") |> 
+  select(person_id, recd_dttm, tsh, t4_free, t3_free, age, sex, race) |>
+  ungroup() |> 
+  distinct()
+
+```
+
+## Summarise Missingness
+
+```{r}
+
+data_filled |> 
+  select(-person_id, -recd_dttm) |> 
+  map_dbl(~sum(is.na(.x))) |> 
+  enframe(name = "variable", value = "n_missing") |> 
+  arrange(desc(n_missing)) |> 
+  mutate(pct_missing = n_missing / nrow(data_filled))
+
+```
+
+## Calculate Reference Intervals without Separating Abnormals
+
+```{r}
+
+library(refineR)
+
+ri_tsh_all <- findRI(data_filled$tsh, NBootstrap = 30, model = "modBoxCox", seed = 12345)
+ri_t4_all <- findRI(data_filled$t4_free, NBootstrap = 30, model = "modBoxCox", seed = 12345)
+ri_t3_all <- findRI(data_filled$t3_free, NBootstrap = 30, model = "modBoxCox", seed = 12345)
+
+ri_list <- list("TSH_all" = ri_tsh_all, "T4_all" = ri_t4_all, "T3_all" = ri_t3_all)
+
+```
+
+## Subset to Only Normal Results
+
+```{r}
+
+data_filled_with_normal_flags <- 
+  data_filled |> 
+  mutate(
+    tsh_normal = (tsh >= 0.3 & tsh <= 4.2),
+    t4_normal = (t4_free >= 0.9 & t4_free <= 1.7))
+
+ri_tsh_of_normal_t4 <- findRI(data_filled_with_normal_flags |> dplyr::filter(t4_normal) |> drop_na(tsh) |> pluck("tsh"), NBootstrap = 30, model = "modBoxCox", seed = 12345)
+ri_t4_of_normal_tsh <- findRI(data_filled_with_normal_flags |> filter(tsh_normal) |> drop_na(t4_free) |> pluck("t4_free"), NBootstrap = 30, model = "modBoxCox", seed = 12345)
+
+file_path <- "C:/Users/yanch/OneDrive - Washington University in St. Louis/clin_chem/01_research/07_indirect_ri/outpatient.xlsx"
+
+ri_tsh_of_normal_t4 |> write_rds("C:/Users/yanch/OneDrive - Washington University in St. Louis/clin_chem/01_research/07_indirect_ri/thyroid_indirect_reference_intervals/results/ri_tsh_of_normal_t4.rds")
+ri_t4_of_normal_tsh |> write_rds("C:/Users/yanch/OneDrive - Washington University in St. Louis/clin_chem/01_research/07_indirect_ri/thyroid_indirect_reference_intervals/results/ri_t4_of_normal_tsh.rds")
+
+```
+
+## Add Back Increasing Subsets of Abnormal Results
+
+```{r}
+
+prop_abnormal <- seq(0, 1, by = 0.1)
+
+normal_tsh <- data_filled_with_normal_flags |> filter(tsh_normal) |> drop_na(t4_free)
+abnormal_tsh <- data_filled_with_normal_flags |> filter(!tsh_normal) |> drop_na(t4_free)
+
+normal_t4 <- data_filled_with_normal_flags |> filter(t4_normal) |> drop_na(tsh)
+abnormal_t4 <- data_filled_with_normal_flags |> filter(!t4_normal) |> drop_na(tsh)
+
+
+addAbnormals <- function(normals = normal_tsh, abnormals = abnormal_tsh, proportion = 0.1){
+  
+  n_normals <- nrow(normals)
+  n_abnormals <- n_normals * proportion
+  
+  output <- bind_rows(normals, abnormals |> slice_sample(n = floor(n_abnormals)))
+  
+  return(output)
+  
+}
+
+tsh_addbacks <- map(prop_abnormal, ~addAbnormals(normal_t4, abnormal_t4, .x))
+t4_addbacks <- map(prop_abnormal, ~addAbnormals(normal_tsh, abnormal_tsh, .x))
+
+ri_tsh_addbacks <- map(tsh_addbacks, ~findRI(.x$tsh, NBootstrap = 30, model = "modBoxCox", seed = 12345)) |> set_names(prop_abnormal)
+ri_t4_addbacks <- map(t4_addbacks, ~findRI(.x$t4_free, NBootstrap = 30, model = "modBoxCox", seed = 12345)) |> set_names(prop_abnormal)
+
+ri_tsh_addbacks |> write_rds("C:/Users/yanch/OneDrive - Washington University in St. Louis/clin_chem/01_research/07_indirect_ri/thyroid_indirect_reference_intervals/results/ri_tsh_addbacks.rds")
+ri_t4_addbacks |> write_rds("C:/Users/yanch/OneDrive - Washington University in St. Louis/clin_chem/01_research/07_indirect_ri/thyroid_indirect_reference_intervals/results/ri_t4_addbacks.rds")
+
+```
+
+## *Optional* Compare to Clinically Based "Healthy" Definition
+
+## Compare the Intervals
+
+### Reformat Intervals into Tidy Format
+
+```{r}
+
+tsh_ri_combined <- 
+  bind_rows(
+    map2_dfr(ri_tsh_addbacks, prop_abnormal, ~getRI(.x) |> mutate(assay = "TSH", cohort = paste0("Normal + ", .y * 100, "% Abnormal"))))
+
+t4_ri_combined <- 
+  bind_rows(
+    map2_dfr(ri_t4_addbacks, prop_abnormal, ~getRI(.x) |> mutate(assay = "T4", cohort = paste0("Normal + ", .y * 100, "% Abnormal"))))
+
+all_ri_combined <- 
+  bind_rows(
+    #tsh_ri_combined, 
+    t4_ri_combined
+    )
+
+gg_input_all_ri <- 
+  all_ri_combined |> 
+    mutate(
+      assay = factor(assay, levels = c("TSH", "T4")),
+      limit = factor(Percentile, labels = c("Lower Limit", "Upper Limit")),
+      cohort = factor(cohort, levels = c("Normal + 0% Abnormal", "Normal + 10% Abnormal", "Normal + 20% Abnormal", "Normal + 30% Abnormal", "Normal + 40% Abnormal", "Normal + 50% Abnormal", "Normal + 60% Abnormal", "Normal + 70% Abnormal", "Normal + 80% Abnormal", "Normal + 90% Abnormal", "Normal + 100% Abnormal")))
+
+gg_current_ref_ranges <- 
+  tibble(assay = c("TSH", "T4"), CILow = c(0.3, 0.9), CIHigh = c(4.2, 1.7)) |> 
+  pivot_longer(cols = CILow:CIHigh, names_to = "CI", values_to = "Value") |> 
+  mutate(limit = factor(CI, labels = c("Upper Limit", "Lower Limit")))
+
+```
+
+## Make Figures
+
+### Compare the Reference Intervals Directly
+
+```{r}
+#| fig.width: 8
+#| fig.height: 5
+
+  ggplot() +
+    geom_segment(data = gg_input_all_ri |> filter(assay == "T4"), aes(x = CILow, xend = CIHigh, y = fct_rev(cohort), color = limit)) + 
+    geom_vline(data = gg_current_ref_ranges |> filter(assay == "T4"), aes(xintercept = Value, color = limit), linetype = "dashed") +
+    scico::scale_color_scico_d(palette = "berlin", begin = 0.1, end = 0.9) +
+    scale_x_continuous(name = "Free T4 (ng/dL)") + 
+    coord_cartesian(clip = "off") + 
+    theme(strip.placement = "outside", strip.background = element_blank(), axis.title.y.left = element_blank(), legend.position = "none") 
+
+```
+
+## Distribution Plots
+
+```{r}
+
+library(gridExtra)
+library(gridGraphics)
+library(grid)
+library(ggplotify)
+
+gg_out <- as.ggplot(function() plot(ri_t4_addbacks[[10]], showPathol = TRUE))
+
+dist_plots <- map(ri_t4_addbacks, ~as.ggplot(function() plot(.x, showPathol = TRUE)))
+
+ggpubr::ggarrange(plotlist = dist_plots, nrow = 2, ncol = 6)
+ggsave("C:/Users/yanch/OneDrive - Washington University in St. Louis/clin_chem/01_research/07_indirect_ri/thyroid_indirect_reference_intervals/figures/ri_t4_dist_plots.png", width = 18, height = 12, dpi = 600, bg = "white")
+
+```
+
+## Simulated Direct RI Study
+
+```{r}
+
+norm <- rnorm(1000000, mean = 3, sd = 0.25)
+ri <- c(quantile(norm, 0.025), quantile(norm, 0.975))
+
+ri
+
+```
