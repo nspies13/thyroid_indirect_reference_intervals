@@ -4,3 +4,7 @@
 .Ruserdata
 Data/*
 data/*
+*.xslx
+*.csv
+*.tsv
+*.xls
